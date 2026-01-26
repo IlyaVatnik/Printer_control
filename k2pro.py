@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__=1.0
+__version__=1.1
 __date__='2026.01.23'
 
 from dataclasses import dataclass
@@ -10,29 +10,46 @@ import requests
 
 
 class PrinterError(RuntimeError):
- pass
+    pass
 
 
 @dataclass
 class K2ProConfig:
+
     base_url: str                  # например: "http://192.168.1.50:7125"
     api_key: Optional[str] = None
-    timeout: float = 10.0
+    timeout: float = 60.0
 
-    # Безопасная высота "в воздухе" (мм)
-    z_air_min: float = 20.0
+    # Габариты насадки как bounding-box офсеты относительно точки toolhead (обычно сопло), мм.
+    
+    '''
+    Если насадка выступает вправо по X на 30 мм и влево на 5 мм:
+    attach_min_x = -5, attach_max_x = +30
+    '''
+    
+    attach_min_x: float = 0.0
+    attach_max_x: float = 0.0
+    '''
+    Если вперёд по Y выступ 20 мм, назад 0:
+    attach_min_y = 0, attach_max_y = +20
+    '''
+    attach_min_y: float = 0.0
+    attach_max_y: float = 0.0
+    '''
+    Если колесо ниже сопла на 12 мм (выступ вниз, т.е. к столу), и вверх насадка не выступает:
+    attach_min_z = -12, attach_max_z = 0
+    '''
+    attach_min_z: float = 0.0
+    attach_max_z: float = 0.0
 
-    # Скорость подъёма/опускания Z (мм/с)
+    # Скорость подъёма/опускания Z (мм/с) для аккуратных движений по Z
     z_speed_mm_s: float = 8.0
 
 
 class K2Pro:
     def __init__(self, cfg: K2ProConfig, *, auto_init: bool = True):
         self.cfg = cfg
-
-        # Кэш лимитов (xmin/xmax/ymin/ymax/zmin/zmax)
         self._limits: Optional[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = None
-
         if auto_init:
             self.initialize()
 
@@ -80,6 +97,9 @@ class K2Pro:
             if a not in homed.lower():
                 raise PrinterError(f"Axis '{a.upper()}' not homed. homed_axes='{homed}'. Run home() first.")
 
+    def wait_moves_m400(self) -> None:
+        self.send_gcode("M400")
+
     def wait_moves(self, poll_interval: float = 0.2, timeout: float = 120.0) -> None:
         t0 = time.time()
         while True:
@@ -92,36 +112,61 @@ class K2Pro:
 
     # ---------------- Init / limits cache ----------------
     def initialize(self) -> None:
-        """
-        Инициализация клиента: проверяем, что принтер доступен, и кэшируем лимиты осей.
-        """
         self._ensure_ready()
         self.refresh_limits()
+        self._validate_attachment_box()
 
     def refresh_limits(self) -> None:
-        """
-        Обновить кэш лимитов осей из Klipper.
-        Вызывать после FIRMWARE_RESTART / изменения конфигурации.
-        """
         st = self.query_status()
         mn = st["toolhead"]["axis_minimum"]  # [xmin,ymin,zmin,emin]
         mx = st["toolhead"]["axis_maximum"]  # [xmax,ymax,zmax,emax]
-        self._limits = ( (float(mn[0]), float(mx[0])),
-                         (float(mn[1]), float(mx[1])),
-                         (float(mn[2]), float(mx[2])) )
+        self._limits = (
+            (float(mn[0]), float(mx[0])),
+            (float(mn[1]), float(mx[1])),
+            (float(mn[2]), float(mx[2])),
+        )
 
     def get_limits_cached(self) -> Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]:
         if self._limits is None:
             raise PrinterError("Limits are not initialized. Call initialize() or use auto_init=True.")
         return self._limits
 
+    def _validate_attachment_box(self) -> None:
+        # Допускаем отрицательные значения (это нормально), но min должен быть <= max
+        for axis in ("x", "y", "z"):
+            mn = float(getattr(self.cfg, f"attach_min_{axis}"))
+            mx = float(getattr(self.cfg, f"attach_max_{axis}"))
+            if mn > mx:
+                raise PrinterError(f"attach_min_{axis} must be <= attach_max_{axis} (got {mn} > {mx})")
+
     # ---------------- G-code ----------------
     def send_gcode(self, script: str) -> None:
         self._post("/printer/gcode/script", {"script": script})
 
-    def home(self, axes: str = "XYZ") -> None:
+    def home(self, axes: str = "XYZ", *, confirm: bool = True) -> None:
+        """
+        Выполнить homing (G28), но только после явного подтверждения в консоли,
+        что с головы сняты все насадки/колесо и homing безопасен.
+
+        confirm=True  -> спросить подтверждение
+        confirm=False -> выполнить без вопроса (на ваш риск)
+        """
         self._ensure_ready()
+
+        if confirm:
+            prompt = (
+                f"About to run G28 {axes.upper()}.\n"
+                "CONFIRM: all attachments/wheel are REMOVED from the toolhead.\n"
+                "Type 'YES' to continue: "
+            )
+            ans = input(prompt).strip().upper()
+            if ans != "YES":
+                raise PrinterError("Homing cancelled by user (confirmation not received).")
+
         self.send_gcode(f"G28 {axes.upper()}")
+        self.wait_moves_m400()
+        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=-(self.cfg.attach_min_z)+10,speed_mm_s=20)
+        
 
     # ---------------- Validation helpers ----------------
     @staticmethod
@@ -129,11 +174,26 @@ class K2Pro:
         if v < lo or v > hi:
             raise PrinterError(f"{name}={v:.3f} out of range [{lo:.3f}, {hi:.3f}]")
 
-    def _check_xyz_in_limits(self, x: float, y: float, z: float) -> None:
+    def _check_xyz_with_attachment(self, x: float, y: float, z: float) -> None:
+        """
+        Проверяем, что bounding-box насадки целиком в пределах рабочего поля.
+        """
         (xmin, xmax), (ymin, ymax), (zmin, zmax) = self.get_limits_cached()
-        self._range_check(x, xmin, xmax, "X")
-        self._range_check(y, ymin, ymax, "Y")
-        self._range_check(z, zmin, zmax, "Z")
+
+        # Координаты крайних точек насадки
+        x0 = x + float(self.cfg.attach_min_x)
+        x1 = x + float(self.cfg.attach_max_x)
+        y0 = y + float(self.cfg.attach_min_y)
+        y1 = y + float(self.cfg.attach_max_y)
+        z0 = z + float(self.cfg.attach_min_z)
+        z1 = z + float(self.cfg.attach_max_z)
+
+        self._range_check(x0, xmin, xmax, "X+attach_min_x")
+        self._range_check(x1, xmin, xmax, "X+attach_max_x")
+        self._range_check(y0, ymin, ymax, "Y+attach_min_y")
+        self._range_check(y1, ymin, ymax, "Y+attach_max_y")
+        self._range_check(z0, zmin, zmax, "Z+attach_min_z")
+        self._range_check(z1, zmin, zmax, "Z+attach_max_z")
 
     # ---------------- Motion limits ----------------
     def set_motion_limits(self, velocity_mm_s: float, accel_mm_s2: float) -> None:
@@ -142,21 +202,42 @@ class K2Pro:
             raise PrinterError("velocity_mm_s and accel_mm_s2 must be > 0")
         self.send_gcode(f"SET_VELOCITY_LIMIT VELOCITY={velocity_mm_s:.3f} ACCEL={accel_mm_s2:.1f}")
 
-    # ---------------- Safe Y-only pass ----------------
+    # ---------------- Moves ----------------
+    def move_absolute(self, *, x: float, y: float, z: float, speed_mm_s: float, wait: bool = True) -> None:
+        self._ensure_ready()
+        self._ensure_homed("xyz")
+
+        if speed_mm_s <= 0:
+            raise PrinterError("speed_mm_s must be > 0")
+
+        x = float(x); y = float(y); z = float(z)
+        self._check_xyz_with_attachment(x, y, z)
+
+        F = int(speed_mm_s * 60.0)
+        self.send_gcode("\n".join([
+            "G90",
+            f"G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{F}",
+        ]))
+        if wait:
+            self.wait_moves()
+
     def safe_y_pass(
         self,
         *,
         x: float,
         y_start: float,
         y_end: float,
+        z_safe: float,
         z_contact: float,
         travel_speed_mm_s: float = 25.0,
         approach_speed_mm_s: float = 25.0,
         wait: bool = True,
     ) -> None:
         """
-        Безопасный проезд колесиком строго вдоль Y:
-          Z вверх -> (X, Y_start) -> Z вниз -> Y_end -> Z вверх
+        Безопасный проезд колесиком строго вдоль Y.
+
+        z_safe задаёте явно (в воздухе). Код проверит, что с учётом насадки
+        и на z_safe, и на z_contact ничего не выходит за пределы.
         """
         self._ensure_ready()
         self._ensure_homed("xyz")
@@ -167,16 +248,14 @@ class K2Pro:
         x = float(x)
         y_start = float(y_start)
         y_end = float(y_end)
+        z_safe = float(z_safe)
         z_contact = float(z_contact)
 
-        # Валидация по кэшированным лимитам (НЕ дергаем Moonraker каждый раз)
-        self._check_xyz_in_limits(x, y_start, z_contact)
-        self._check_xyz_in_limits(x, y_end, z_contact)
-
-        z_air = float(self.cfg.z_air_min)
-        if z_air < z_contact:
-            # в таком случае поднимемся хотя бы на z_contact, чтобы не ехать "сквозь"
-            z_air = z_contact
+        # Проверим все ключевые точки (с учётом габаритов)
+        self._check_xyz_with_attachment(x, y_start, z_safe)
+        self._check_xyz_with_attachment(x, y_end, z_safe)
+        self._check_xyz_with_attachment(x, y_start, z_contact)
+        self._check_xyz_with_attachment(x, y_end, z_contact)
 
         Fz = int(self.cfg.z_speed_mm_s * 60.0)
         F_approach = int(approach_speed_mm_s * 60.0)
@@ -184,40 +263,53 @@ class K2Pro:
 
         script = "\n".join([
             "G90",
-            f"G1 Z{z_air:.3f} F{Fz}",
+            f"G1 Z{z_safe:.3f} F{Fz}",
             f"G1 X{x:.3f} Y{y_start:.3f} F{F_approach}",
             f"G1 Z{z_contact:.3f} F{Fz}",
             f"G1 Y{y_end:.3f} F{F_travel}",  # строго по Y
-            f"G1 Z{z_air:.3f} F{Fz}",
+            f"G1 Z{z_safe:.3f} F{Fz}",
         ])
         self.send_gcode(script)
 
         if wait:
-            self.wait_moves()
+            self.wait_moves_m400()
       #%%       
 if __name__=='__main__':
-   #%%
+    
+    '''
+    Если насадка выступает вправо по X на 30 мм и влево на 5 мм:
+    attach_min_x = -5, attach_max_x = +30
+    
+    Если колесо ниже сопла на 12 мм (выступ вниз, т.е. к столу), и вверх насадка не выступает:
+    attach_min_z = -12, attach_max_z = 0
+    
+    Если вперёд по Y выступ 20 мм, назад 0:
+    attach_min_y = 0, attach_max_y = +20
+    '''
+
     p = K2Pro(K2ProConfig(
         base_url="http://10.2.15.109:7125",
-        z_air_min=30,   # ездим в воздухе не ниже 
-    ))
+        attach_min_x=-30,  attach_max_x=30,
+        attach_min_y=-20,  attach_max_y=-20,
+        attach_min_z=-40, attach_max_z=0,
+        ))
     
     print(p.printer_info())
     #%%
     p.home("XYZ")
-    p.set_motion_limits(velocity_mm_s=35, accel_mm_s2=500)
+    p.set_motion_limits(velocity_mm_s=100, accel_mm_s2=500)
     #%%
-
-    
-    p.safe_y_pass(
-    x=150,
-    y_start=30,
-    y_end=250,
-    z_contact=20,          # подобрать экспериментально!
-    approach_speed_mm_s=25,
-    travel_speed_mm_s=20,
-    )
-    
+    for x in [100,200,300]: 
+        p.safe_y_pass(
+        x=x,
+        y_start=20,
+        y_end=250,
+        z_safe=50,
+        z_contact=40,          # подобрать экспериментально!
+        approach_speed_mm_s=100,
+        travel_speed_mm_s=60,
+        )
+        
     
 
    
