@@ -49,6 +49,8 @@ class PrinterConfig:
 
     # Скорость подъёма/опускания Z (мм/с) для аккуратных движений по Z
     z_speed_mm_s: float = 8.0
+    
+    temp_bed_maximum =100 # maxumim allowed bed temperature
 
 
 class Printer:
@@ -143,10 +145,35 @@ class Printer:
             mx = float(getattr(self.cfg, f"attach_max_{axis}"))
             if mn > mx:
                 raise PrinterError(f"attach_min_{axis} must be <= attach_max_{axis} (got {mn} > {mx})")
-
+                
+    def _query_objects(self, objects: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Low-level helper to query arbitrary Klipper objects via Moonraker.
+        Example: objects={"heater_bed": None, "temperature_sensor chamber": None}
+        """
+        params = {k: "" for k in objects.keys()}
+        return self._get("/printer/objects/query", params=params)["result"]["status"]
     # ---------------- G-code ----------------
     def send_gcode(self, script: str) -> None:
         self._post("/printer/gcode/script", {"script": script})
+                
+       
+    def find_properties(self, property_name:str) :
+        try:
+            objs = self._get("/printer/objects/list")["result"]["objects"]
+        except Exception:
+            objs = None
+
+        hint = ""
+        if isinstance(objs, list):
+            # Подскажем, что искать
+            chamber_like = [o for o in objs if property_name in o.lower()]
+            hint = f" Available objects containing {property_name}: {chamber_like}" if chamber_like else ""
+
+        return hint
+
+
+
 
     # ---------------- Thermals (Moonraker/Klipper) ----------------
     @staticmethod
@@ -156,13 +183,6 @@ class Printer:
         except Exception as e:
             raise PrinterError(f"Cannot convert {name}='{v}' to float") from e
 
-    def _query_objects(self, objects: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Low-level helper to query arbitrary Klipper objects via Moonraker.
-        Example: objects={"heater_bed": None, "temperature_sensor chamber": None}
-        """
-        params = {k: "" for k in objects.keys()}
-        return self._get("/printer/objects/query", params=params)["result"]["status"]
 
     def get_bed_temperature(self) -> Tuple[float, Optional[float]]:
         """
@@ -188,7 +208,7 @@ class Printer:
         """
         self._ensure_ready()
         temp_c = float(temp_c)
-        if temp_c < 0 or temp_c > 150:
+        if temp_c < 0 or temp_c > self.cfg.temp_bed_maximum:
             raise PrinterError(f"Bed temperature out of expected range: {temp_c}C")
 
         cmd = "M190" if wait else "M140"
@@ -196,7 +216,7 @@ class Printer:
         if wait:
             self.wait_moves_m400()
 
-    def get_chamber_temperature(self) -> Tuple[float, Optional[float]]:
+    def get_chamber_temperature(self, obj_name='temperature_sensor chamber_temp') -> Tuple[float, Optional[float]]:
         """
         Returns (current, target) for chamber temperature.
 
@@ -206,6 +226,7 @@ class Printer:
           2) heater_generic chamber
           3) temperature_fan chamber
           4) chamber (rare/custom)
+          5)
 
         For temperature_sensor: only 'temperature' exists (no target) -> target=None
         For heater_generic:     'temperature' + 'target'
@@ -213,43 +234,23 @@ class Printer:
 
         If none found -> raises PrinterError with guidance.
         """
-        candidates = [
-            "temperature_sensor chamber",
-            "heater_generic chamber",
-            "temperature_fan chamber",
-            "chamber",
-        ]
+        
 
-        last_err = None
-        for obj in candidates:
-            try:
-                st = self._query_objects({obj: None})
-                data = st.get(obj)
-                if isinstance(data, dict):
-                    cur = self._as_float(data.get("temperature"), f"{obj}.temperature")
-                    tgt = data.get("target", None)
-                    tgt_f = None if tgt is None else self._as_float(tgt, f"{obj}.target")
-                    return cur, tgt_f
-            except Exception as e:
-                last_err = e
-
-        # Дополнительно: попробуем auto-discovery через /printer/objects/list (если доступно)
         try:
-            objs = self._get("/printer/objects/list")["result"]["objects"]
-        except Exception:
-            objs = None
+            st = self._query_objects({obj_name: None})
+            data = st.get(obj_name)
+            if isinstance(data, dict):
+                cur = self._as_float(data.get("temperature"), f"{obj_name}.temperature")
+                tgt = data.get("target", None)
+                tgt_f = None if tgt is None else self._as_float(tgt, f"{obj_name}.target")
+                return cur, tgt_f
+        except Exception as e:
+                last_err = e
+                print(last_err)
 
-        hint = ""
-        if isinstance(objs, list):
-            # Подскажем, что искать
-            chamber_like = [o for o in objs if "chamber" in o.lower()]
-            hint = f" Available objects containing 'chamber': {chamber_like}" if chamber_like else ""
 
-        raise PrinterError(
-            "Chamber temperature object not found. "
-            "Define it in Klipper config, e.g. [temperature_sensor chamber] or [heater_generic chamber]."
-            + hint
-        ) from last_err
+      
+
 
     def set_chamber_temperature(self, temp_c: float, *, wait: bool = False) -> None:
         """
@@ -269,13 +270,13 @@ class Printer:
         """
         self._ensure_ready()
         temp_c = float(temp_c)
-        if temp_c < 0 or temp_c > 90:
+        if temp_c < 0 or temp_c > 60:
             raise PrinterError(f"Chamber temperature out of expected range: {temp_c}C")
 
         # Prefer heater_generic chamber if present
         try:
-            st = self._query_objects({"heater_generic chamber": None})
-            if isinstance(st.get("heater_generic chamber"), dict):
+            st = self._query_objects({"heater_generic chamber_heater": None})
+            if isinstance(st.get("heater_generic chamber_heater"), dict):
                 self.send_gcode(f"SET_HEATER_TEMPERATURE HEATER=chamber TARGET={temp_c:.1f}")
                 if wait:
                     # Простое ожидание: опрашиваем до достижения (с допуском)
@@ -462,6 +463,12 @@ if __name__=='__main__':
         ))
 
     print(p.printer_info())
+    #%%
+    print(p.get_bed_temperature())
+    print(p.get_chamber_temperature())
+    print(p.find_properties('chamber'))
+    #%%
+    print(p.set_bed_temperature(0))
     #%%
     p.home("XYZ")
     p.set_motion_limits(velocity_mm_s=100, accel_mm_s2=500)
