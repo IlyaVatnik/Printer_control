@@ -23,5 +23,12 @@ print(p.printer_info())
 
 
 p.home('XYZ')
+p.set_motion_limits(velocity_mm_s=100, accel_mm_s2=500)
 #%%
-p.safe_y_pass(x=40, y_start=70, y_end=70, z_safe=100, z_contact=96)
+z_safe=100
+z_contact=96
+
+
+for x in np.arange(100,150,2):
+    for y in np.arange(150,180,2):
+        p.safe_y_pass(x=x, y_start=y, y_end=y, z_safe=z_safe, z_contact=z_contact)
