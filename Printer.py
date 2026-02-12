@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__=1.2
-__date__='2026.02.09'
+__version__='1.4'
+__date__='2026.02.12'
 
 
 '''
@@ -9,7 +9,7 @@ Operates through Moonraker/Klipper protokol using HTTP
 '''
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple,Literal
 import time
 import requests
 
@@ -116,6 +116,38 @@ class Printer:
             if time.time() - t0 > timeout:
                 raise PrinterError("Timeout waiting for moves to finish")
             time.sleep(poll_interval)
+            
+    def get_position(self, *, source: Literal["toolhead", "gcode_move"] = "toolhead"):
+        """
+        Возвращает текущие координаты.
+    
+        source="toolhead":
+          printer.toolhead.position -> обычно "реальная" позиция по кинематике/степперам, [x,y,z,e]
+        source="gcode_move":
+          printer.gcode_move.position -> позиция в координатах gcode (с учетом G92/смещений), [x,y,z,e]
+    
+        Практически:
+          - для контроля фактического положения головы: toolhead
+          - если важны именно G-code координаты (после G92 и т.п.): gcode_move
+        """
+        self._ensure_ready()
+    
+        if source == "toolhead":
+            st = self._get(
+                "/printer/objects/query",
+                params={"toolhead": "position,homed_axes"},
+            )["result"]["status"]
+            th = st["toolhead"]
+            pos = th["position"]  # [x,y,z,e]
+        else:
+            st = self._get(
+                "/printer/objects/query",
+                params={"gcode_move": "position,homing_origin"},
+            )["result"]["status"]
+            gm = st["gcode_move"]
+            pos = gm["position"]  # [x,y,z,e]
+    
+        return {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2]), "e": float(pos[3])}
 
     # ---------------- Init / limits cache ----------------
     def initialize(self) -> None:
@@ -333,7 +365,7 @@ class Printer:
 
         self.send_gcode(f"G28 {axes.upper()}")
         self.wait_moves_m400()
-        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=-(self.cfg.attach_min_z)+10,speed_mm_s=20)
+        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=250,speed_mm_s=20)
 
 
     # ---------------- Validation helpers ----------------
@@ -370,6 +402,36 @@ class Printer:
             raise PrinterError("velocity_mm_s and accel_mm_s2 must be > 0")
         self.send_gcode(f"SET_VELOCITY_LIMIT VELOCITY={velocity_mm_s:.3f} ACCEL={accel_mm_s2:.1f}")
 
+
+    def set_attached_limits(self,
+                            min_x=None,
+                            max_x=None,
+                            min_y=None,
+                            max_y=None,
+                            min_z=None,
+                            max_z=None):
+        if min_x!=None:
+            self.cfg.attach_min_x = min_x
+        if max_x!=None:
+            self.cfg.attach_max_x = max_x
+        '''
+        Если вперёд по Y выступ 20 мм, назад 0:
+        attach_min_y = 0, attach_max_y = +20
+        '''
+        if min_y!=None:
+            self.cfg.attach_min_y= min_y
+        if max_y!=None:
+            self.cfg.attach_max_y= max_y
+        '''
+        Если колесо ниже сопла на 12 мм (выступ вниз, т.е. к столу), и вверх насадка не выступает:
+        attach_min_z = -12, attach_max_z = 0
+        '''
+        if min_z!=None:
+            self.cfg.attach_min_z =min_z
+        if max_z!=None:
+            self.cfg.attach_max_z =max_z
+        
+        
     # ---------------- Moves ----------------
     def move_absolute(self, *, x: float, y: float, z: float, speed_mm_s: float, wait: bool = True) -> None:
         self._ensure_ready()
@@ -378,13 +440,31 @@ class Printer:
         if speed_mm_s <= 0:
             raise PrinterError("speed_mm_s must be > 0")
 
-        x = float(x); y = float(y); z = float(z)
+        z = float(z)
         self._check_xyz_with_attachment(x, y, z)
 
         F = int(speed_mm_s * 60.0)
         self.send_gcode("\n".join([
             "G90",
             f"G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{F}",
+        ]))
+        if wait:
+            self.wait_moves()
+            
+    def move_z(self, *, z: float, speed_mm_s: float, wait: bool = True) -> None:
+        self._ensure_ready()
+        self._ensure_homed("xyz")
+
+        if speed_mm_s <= 0:
+            raise PrinterError("speed_mm_s must be > 0")
+
+        cur = self.get_position(source="toolhead")
+        self._check_xyz_with_attachment(cur["x"], cur["y"], z)
+
+        F = int(speed_mm_s * 60.0)
+        self.send_gcode("\n".join([
+            "G90",
+            f"G1 Z{z:.3f} F{F}",
         ]))
         if wait:
             self.wait_moves()
@@ -412,6 +492,8 @@ class Printer:
 
         if travel_speed_mm_s <= 0 or approach_speed_mm_s <= 0:
             raise PrinterError("Speeds must be > 0")
+            
+
 
         x = float(x)
         y_start = float(y_start)
