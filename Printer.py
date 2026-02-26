@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__='1.4'
-__date__='2026.02.12'
+__version__='1.5'
+__date__='2026.02.26'
 
 
 '''
@@ -51,6 +51,10 @@ class PrinterConfig:
     z_speed_mm_s: float = 8.0
     
     temp_bed_maximum =100 # maxumim allowed bed temperature
+    
+    max_velocity_mm_s=200
+    max_accel_mm_s2=500
+
 
 
 class Printer:
@@ -154,6 +158,7 @@ class Printer:
         self._ensure_ready()
         self.refresh_limits()
         self._validate_attachment_box()
+        self.set_motion_limits(velocity_mm_s=self.cfg.max_velocity_mm_s, accel_mm_s2=self.cfg.max_accel_mm_s2)
 
     def refresh_limits(self) -> None:
         st = self.query_status()
