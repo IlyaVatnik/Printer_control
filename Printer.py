@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__='1.5'
-__date__='2026.02.26'
+__version__='1.6'
+__date__='2026.03.04'
 
 
 '''
@@ -21,7 +21,7 @@ class PrinterError(RuntimeError):
 @dataclass
 class PrinterConfig:
 
-    base_url: str                  # например: "http://192.168.1.50:7125"
+    base_url: str="http://10.2.15.109:7125"                  # например: "http://192.168.1.50:7125"
     api_key: Optional[str] = None
     timeout: float = 60.0
 
