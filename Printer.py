@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__='1.6'
-__date__='2026.03.04'
+__version__='1.7'
+__date__='2026.03.05'
 
 
 '''
@@ -370,7 +370,7 @@ class Printer:
 
         self.send_gcode(f"G28 {axes.upper()}")
         self.wait_moves_m400()
-        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=250,speed_mm_s=20)
+        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=self._limits[1][2]/2,speed_mm_s=20)
 
 
     # ---------------- Validation helpers ----------------
@@ -384,8 +384,8 @@ class Printer:
         Проверяем, что bounding-box насадки целиком в пределах рабочего поля.
         """
         (xmin, xmax), (ymin, ymax), (zmin, zmax) = self.get_limits_cached()
-
-        # Координаты крайних точек насадки
+        
+        # Координаты крайних точек насадки, 
         x0 = x + float(self.cfg.attach_min_x)
         x1 = x + float(self.cfg.attach_max_x)
         y0 = y + float(self.cfg.attach_min_y)
@@ -393,12 +393,12 @@ class Printer:
         z0 = z + float(self.cfg.attach_min_z)
         z1 = z + float(self.cfg.attach_max_z)
 
-        self._range_check(x0, xmin, xmax, "X+attach_min_x")
-        self._range_check(x1, xmin, xmax, "X+attach_max_x")
-        self._range_check(y0, ymin, ymax, "Y+attach_min_y")
-        self._range_check(y1, ymin, ymax, "Y+attach_max_y")
-        self._range_check(z0, zmin, zmax, "Z+attach_min_z")
-        self._range_check(z1, zmin, zmax, "Z+attach_max_z")
+        self._range_check(x0, 0, xmax-10, "X+attach_min_x")
+        self._range_check(x1, 0, xmax-10, "X+attach_max_x")
+        self._range_check(y0, 0, ymax-10, "Y+attach_min_y")
+        self._range_check(y1, 0, ymax-10,"Y+attach_max_y")
+        self._range_check(z0, 0, zmax-10, "Z+attach_min_z")
+        self._range_check(z1, 0, zmax-10, "Z+attach_max_z")
 
     # ---------------- Motion limits ----------------
     def set_motion_limits(self, velocity_mm_s: float, accel_mm_s2: float) -> None:
