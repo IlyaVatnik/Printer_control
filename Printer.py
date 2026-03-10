@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__='1.7'
-__date__='2026.03.05'
+__version__='1.8'
+__date__='2026.03.10'
 
 
 '''
@@ -370,7 +370,7 @@ class Printer:
 
         self.send_gcode(f"G28 {axes.upper()}")
         self.wait_moves_m400()
-        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=self._limits[1][2]/2,speed_mm_s=20)
+        self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=self._limits[2][1]/2,speed_mm_s=20)
 
 
     # ---------------- Validation helpers ----------------
