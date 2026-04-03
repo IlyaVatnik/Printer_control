@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__='1.8'
-__date__='2026.03.10'
+__version__='2.0'
+__date__='2026.04.03'
 
 
 '''
@@ -20,46 +20,52 @@ class PrinterError(RuntimeError):
 
 @dataclass
 class PrinterConfig:
-
-    base_url: str="http://10.2.15.109:7125"                  # например: "http://192.168.1.50:7125"
-    api_key: Optional[str] = None
-    timeout: float = 60.0
-
-    # Габариты насадки как bounding-box офсеты относительно точки toolhead (обычно сопло), мм.
-
-    '''
-    Если насадка выступает вправо по X на 30 мм и влево на 5 мм:
-    attach_min_x = -5, attach_max_x = +30
-    '''
-
-    attach_min_x: float = 0.0
-    attach_max_x: float = 0.0
-    '''
-    Если вперёд по Y выступ 20 мм, назад 0:
-    attach_min_y = 0, attach_max_y = +20
-    '''
-    attach_min_y: float = 0.0
-    attach_max_y: float = 0.0
-    '''
-    Если колесо ниже сопла на 12 мм (выступ вниз, т.е. к столу), и вверх насадка не выступает:
-    attach_min_z = -12, attach_max_z = 0
-    '''
-    attach_min_z: float = 0.0
-    attach_max_z: float = 0.0
-
-    # Скорость подъёма/опускания Z (мм/с) для аккуратных движений по Z
-    z_speed_mm_s: float = 8.0
+    def __init__(self):    
     
-    temp_bed_maximum =100 # maxumim allowed bed temperature
     
-    max_velocity_mm_s=200
-    max_accel_mm_s2=500
-
-
+        self.api_key: Optional[str] = None
+        self.timeout: float = 60.0
+    
+        # Габариты насадки как bounding-box офсеты относительно точки toolhead (обычно сопло), мм.
+    
+        '''
+        Если насадка выступает вправо по X на 30 мм и влево на 5 мм:
+        attach_min_x = -5, attach_max_x = +30
+        '''
+    
+        self.attach_min_x: float = 0.0
+        self.attach_max_x: float = 0.0
+        '''
+        Если вперёд по Y выступ 20 мм, назад 0:
+        attach_min_y = 0, attach_max_y = +20
+        '''
+        self.attach_min_y: float = 0.0
+        self.attach_max_y: float = 0.0
+        '''
+        Если колесо ниже сопла на 12 мм (выступ вниз, т.е. к столу), и вверх насадка не выступает:
+        attach_min_z = -12, attach_max_z = 0
+        '''
+        self.attach_min_z: float = 0.0
+        self.attach_max_z: float = 0.0
+    
+        # Скорость подъёма/опускания Z (мм/с) для аккуратных движений по Z
+    
+        
+        self.temp_bed_maximum =100 # maxumim allowed bed temperature
+        
+        self.max_velocity_mm_s=200
+        self.max_accel_mm_s2=500
+        
+        self.safe_yx_speed_mm_s=100
+        self.safe_z_speed_mm_s: float = 8.0
+    
+        self.IP='10.2.15.109'
+        self.base_url: str="http://"+self.IP+":7125"                  # например: "http://192.168.1.50:7125"
 
 class Printer:
-    def __init__(self, cfg: PrinterConfig, *, auto_init: bool = True):
-        self.cfg = cfg
+    def __init__(self, params: PrinterConfig, *, auto_init: bool = True):
+        self.params = params
+        self.params.base_url="http://"+params.IP+":7125"                  # например: "http://192.168.1.50:7125"
         self._limits: Optional[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = None
         if auto_init:
             self.initialize()
@@ -67,21 +73,21 @@ class Printer:
     # ---------------- HTTP ----------------
     def _headers(self) -> Dict[str, str]:
         h = {"Content-Type": "application/json"}
-        if self.cfg.api_key:
-            h["X-Api-Key"] = self.cfg.api_key
+        if self.params.api_key:
+            h["X-Api-Key"] = self.params.api_key
         return h
 
     def _url(self, path: str) -> str:
-        return self.cfg.base_url.rstrip("/") + path
+        return self.params.base_url.rstrip("/") + path
 
     def _get(self, path: str, params: Optional[dict] = None) -> Dict[str, Any]:
-        r = requests.get(self._url(path), params=params, headers=self._headers(), timeout=self.cfg.timeout)
+        r = requests.get(self._url(path), params=params, headers=self._headers(), timeout=self.params.timeout)
         if not r.ok:
             raise PrinterError(f"GET {path} failed: {r.status_code} {r.text}")
         return r.json()
 
     def _post(self, path: str, payload: dict) -> Dict[str, Any]:
-        r = requests.post(self._url(path), json=payload, headers=self._headers(), timeout=self.cfg.timeout)
+        r = requests.post(self._url(path), json=payload, headers=self._headers(), timeout=self.params.timeout)
         if not r.ok:
             raise PrinterError(f"POST {path} failed: {r.status_code} {r.text}")
         return r.json()
@@ -120,7 +126,10 @@ class Printer:
             if time.time() - t0 > timeout:
                 raise PrinterError("Timeout waiting for moves to finish")
             time.sleep(poll_interval)
-            
+   
+    def get_name(self):
+        result=self._get('/printer/info')
+        return result['hostname']
     def get_position(self, *, source: Literal["toolhead", "gcode_move"] = "toolhead"):
         """
         Возвращает текущие координаты.
@@ -158,7 +167,7 @@ class Printer:
         self._ensure_ready()
         self.refresh_limits()
         self._validate_attachment_box()
-        self.set_motion_limits(velocity_mm_s=self.cfg.max_velocity_mm_s, accel_mm_s2=self.cfg.max_accel_mm_s2)
+        self.set_motion_limits(velocity_mm_s=self.params.max_velocity_mm_s, accel_mm_s2=self.params.max_accel_mm_s2)
 
     def refresh_limits(self) -> None:
         st = self.query_status()
@@ -178,8 +187,8 @@ class Printer:
     def _validate_attachment_box(self) -> None:
         # Допускаем отрицательные значения (это нормально), но min должен быть <= max
         for axis in ("x", "y", "z"):
-            mn = float(getattr(self.cfg, f"attach_min_{axis}"))
-            mx = float(getattr(self.cfg, f"attach_max_{axis}"))
+            mn = float(getattr(self.params, f"attach_min_{axis}"))
+            mx = float(getattr(self.params, f"attach_max_{axis}"))
             if mn > mx:
                 raise PrinterError(f"attach_min_{axis} must be <= attach_max_{axis} (got {mn} > {mx})")
                 
@@ -231,7 +240,8 @@ class Printer:
         st = self._query_objects({"heater_bed": None})
         hb = st.get("heater_bed")
         if not isinstance(hb, dict):
-            raise PrinterError("Klipper object 'heater_bed' not found. Check printer.cfg configuration.")
+            # raise PrinterError("Klipper object 'heater_bed' not found. Check printer.cfg configuration.")
+            return None,None
         cur = self._as_float(hb.get("temperature"), "heater_bed.temperature")
         tgt = hb.get("target", None)
         tgt_f = None if tgt is None else self._as_float(tgt, "heater_bed.target")
@@ -245,7 +255,7 @@ class Printer:
         """
         self._ensure_ready()
         temp_c = float(temp_c)
-        if temp_c < 0 or temp_c > self.cfg.temp_bed_maximum:
+        if temp_c < 0 or temp_c > self.params.temp_bed_maximum:
             raise PrinterError(f"Bed temperature out of expected range: {temp_c}C")
 
         cmd = "M190" if wait else "M140"
@@ -282,8 +292,9 @@ class Printer:
                 tgt_f = None if tgt is None else self._as_float(tgt, f"{obj_name}.target")
                 return cur, tgt_f
         except Exception as e:
-                last_err = e
-                print(last_err)
+                # last_err = e
+                # print(last_err)
+                return None,None
 
 
       
@@ -317,7 +328,7 @@ class Printer:
                 self.send_gcode(f"SET_HEATER_TEMPERATURE HEATER=chamber TARGET={temp_c:.1f}")
                 if wait:
                     # Простое ожидание: опрашиваем до достижения (с допуском)
-                    self._wait_chamber_reach(temp_c, tol=1.0, timeout_s=self.cfg.timeout)
+                    self._wait_chamber_reach(temp_c, tol=1.0, timeout_s=self.params.timeout)
                 return
         except Exception:
             pass
@@ -328,7 +339,7 @@ class Printer:
             if isinstance(st.get("temperature_fan chamber"), dict):
                 self.send_gcode(f"SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET={temp_c:.1f}")
                 if wait:
-                    self._wait_chamber_reach(temp_c, tol=1.0, timeout_s=self.cfg.timeout)
+                    self._wait_chamber_reach(temp_c, tol=1.0, timeout_s=self.params.timeout)
                 return
         except Exception:
             pass
@@ -386,19 +397,19 @@ class Printer:
         (xmin, xmax), (ymin, ymax), (zmin, zmax) = self.get_limits_cached()
         
         # Координаты крайних точек насадки, 
-        x0 = x + float(self.cfg.attach_min_x)
-        x1 = x + float(self.cfg.attach_max_x)
-        y0 = y + float(self.cfg.attach_min_y)
-        y1 = y + float(self.cfg.attach_max_y)
-        z0 = z + float(self.cfg.attach_min_z)
-        z1 = z + float(self.cfg.attach_max_z)
-
-        self._range_check(x0, 0, xmax-10, "X+attach_min_x")
-        self._range_check(x1, 0, xmax-10, "X+attach_max_x")
-        self._range_check(y0, 0, ymax-10, "Y+attach_min_y")
-        self._range_check(y1, 0, ymax-10,"Y+attach_max_y")
-        self._range_check(z0, 0, zmax-10, "Z+attach_min_z")
-        self._range_check(z1, 0, zmax-10, "Z+attach_max_z")
+        x0 = x + float(self.params.attach_min_x)
+        x1 = x + float(self.params.attach_max_x)
+        y0 = y + float(self.params.attach_min_y)
+        y1 = y + float(self.params.attach_max_y)
+        z0 = z + float(self.params.attach_min_z)
+        z1 = z + float(self.params.attach_max_z)
+        additional_shift=5
+        self._range_check(x0, xmin+additional_shift, xmax-additional_shift, "X+attach_min_x")
+        self._range_check(x1, xmin+additional_shift, xmax-additional_shift, "X+attach_max_x")
+        self._range_check(y0, ymin+additional_shift, ymax-additional_shift, "Y+attach_min_y")
+        self._range_check(y1, ymin+additional_shift, ymax-additional_shift,"Y+attach_max_y")
+        self._range_check(z0, zmin+additional_shift, zmax-additional_shift, "Z+attach_min_z")
+        self._range_check(z1, zmin+additional_shift, zmax-additional_shift, "Z+attach_max_z")
 
     # ---------------- Motion limits ----------------
     def set_motion_limits(self, velocity_mm_s: float, accel_mm_s2: float) -> None:
@@ -416,25 +427,25 @@ class Printer:
                             min_z=None,
                             max_z=None):
         if min_x!=None:
-            self.cfg.attach_min_x = min_x
+            self.params.attach_min_x = min_x
         if max_x!=None:
-            self.cfg.attach_max_x = max_x
+            self.params.attach_max_x = max_x
         '''
         Если вперёд по Y выступ 20 мм, назад 0:
         attach_min_y = 0, attach_max_y = +20
         '''
         if min_y!=None:
-            self.cfg.attach_min_y= min_y
+            self.params.attach_min_y= min_y
         if max_y!=None:
-            self.cfg.attach_max_y= max_y
+            self.params.attach_max_y= max_y
         '''
         Если колесо ниже сопла на 12 мм (выступ вниз, т.е. к столу), и вверх насадка не выступает:
         attach_min_z = -12, attach_max_z = 0
         '''
         if min_z!=None:
-            self.cfg.attach_min_z =min_z
+            self.params.attach_min_z =min_z
         if max_z!=None:
-            self.cfg.attach_max_z =max_z
+            self.params.attach_max_z =max_z
         
         
     # ---------------- Moves ----------------
@@ -456,10 +467,12 @@ class Printer:
         if wait:
             self.wait_moves()
             
-    def move_z(self, *, z: float, speed_mm_s: float, wait: bool = True) -> None:
+    def move_z(self, *, z: float, speed_mm_s: float=None, wait: bool = True) -> None:
         self._ensure_ready()
         self._ensure_homed("xyz")
-
+        
+        if speed_mm_s==None:
+            speed_mm_s=self.params.safe_z_speed_mm_s
         if speed_mm_s <= 0:
             raise PrinterError("speed_mm_s must be > 0")
 
@@ -482,8 +495,6 @@ class Printer:
         y_end: float,
         z_safe: float,
         z_contact: float,
-        travel_speed_mm_s: float = 25.0,
-        approach_speed_mm_s: float = 25.0,
         wait: bool = True,
     ) -> None:
         """
@@ -495,9 +506,7 @@ class Printer:
         self._ensure_ready()
         self._ensure_homed("xyz")
 
-        if travel_speed_mm_s <= 0 or approach_speed_mm_s <= 0:
-            raise PrinterError("Speeds must be > 0")
-            
+
 
 
         x = float(x)
@@ -512,9 +521,9 @@ class Printer:
         self._check_xyz_with_attachment(x, y_start, z_contact)
         self._check_xyz_with_attachment(x, y_end, z_contact)
 
-        Fz = int(self.cfg.z_speed_mm_s * 60.0)
-        F_approach = int(approach_speed_mm_s * 60.0)
-        F_travel = int(travel_speed_mm_s * 60.0)
+        Fz = int(self.params.safe_z_speed_mm_s * 60.0)
+        F_approach = int(self.params.safe_yx_speed_mm_s * 60.0)
+        F_travel = int(self.params.safe_yx_speed_mm_s * 60.0)
 
         script = "\n".join([
             "G90",
@@ -542,12 +551,15 @@ if __name__=='__main__':
     attach_min_y = 0, attach_max_y = +20
     '''
 
-    p = Printer(PrinterConfig(
-        base_url="http://10.2.15.109:7125",
-        attach_min_x=-30,  attach_max_x=30,
-        attach_min_y=-20,  attach_max_y=-20,
-        attach_min_z=-40, attach_max_z=0,
-        ))
+    # p = Printer(PrinterConfig(
+    #     base_url="http://10.2.15.109:7125",
+    #     attach_min_x=-30,  attach_max_x=30,
+    #     attach_min_y=-20,  attach_max_y=-20,
+    #     attach_min_z=-40, attach_max_z=0,
+    #     ))
+    
+    p = Printer(PrinterConfig())
+
 
     print(p.printer_info())
     #%%
@@ -567,6 +579,5 @@ if __name__=='__main__':
         y_end=250,
         z_safe=50,
         z_contact=40,          # подобрать экспериментально!
-        approach_speed_mm_s=100,
         travel_speed_mm_s=60,
         )
