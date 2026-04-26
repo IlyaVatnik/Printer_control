@@ -465,7 +465,7 @@ class Printer:
             f"G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{F}",
         ]))
         if wait:
-            self.wait_moves()
+            self.wait_moves_m400()
             
     def move_z(self, *, z: float, speed_mm_s: float=None, wait: bool = True) -> None:
         self._ensure_ready()
@@ -485,7 +485,7 @@ class Printer:
             f"G1 Z{z:.3f} F{F}",
         ]))
         if wait:
-            self.wait_moves()
+            self.wait_moves_m400()
 
     def safe_y_pass(
         self,
