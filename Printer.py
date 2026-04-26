@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-__version__='2.1'
-__date__='2026.04.21'
+__version__='2.2'
+__date__='2026.04.26'
 
 
 '''
