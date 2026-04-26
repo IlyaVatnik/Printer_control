@@ -403,7 +403,7 @@ class Printer:
         y1 = y + float(self.params.attach_max_y)
         z0 = z + float(self.params.attach_min_z)
         z1 = z + float(self.params.attach_max_z)
-        additional_shift=5
+        additional_shift=0
         self._range_check(x0, xmin+additional_shift, xmax-additional_shift, "X+attach_min_x")
         self._range_check(x1, xmin+additional_shift, xmax-additional_shift, "X+attach_max_x")
         self._range_check(y0, ymin+additional_shift, ymax-additional_shift, "Y+attach_min_y")
