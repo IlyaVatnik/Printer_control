@@ -381,6 +381,9 @@ class Printer:
 
         self.send_gcode(f"G28 {axes.upper()}")
         self.wait_moves_m400()
+        self.move_center()
+        
+    def move_center(self):
         self.move_absolute(x=self._limits[0][1]/2,y=self._limits[1][1]/2, z=self._limits[2][1]-10,speed_mm_s=50)
 
 
